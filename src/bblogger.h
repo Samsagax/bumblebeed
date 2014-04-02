@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, The Bumblebee Project
+ * Copyright (c) 2011-2013, The Bumblebee Project
  * Author: Joaquín Ignacio Aramendía samsagax@gmail.com
  *
  * This file is part of Bumblebee.
@@ -42,5 +42,10 @@ void bb_log(int priority, char* msg_format, ...);
  * Close logging mechanism 
  */
 void bb_closelog(void);
+
+/** Will check the xorg output pipe and parse any waiting messages.
+ * Doesn't take any parameters and doesn't return anything.
+ */
+void check_xorg_pipe(void);
 
 #endif

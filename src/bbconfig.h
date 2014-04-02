@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, The Bumblebee Project
+ * Copyright (c) 2011-2013, The Bumblebee Project
  * Author: Joaquín Ignacio Aramendía samsagax@gmail.com
  * Author: Jaron Viëtor AKA "Thulinma" <jaron@vietors.com>
  *
@@ -33,6 +33,7 @@
 
 /* Parsing rounds */
 enum {
+    PARSE_STAGE_LOG,
     PARSE_STAGE_PRECONF,
     PARSE_STAGE_DRIVER,
     PARSE_STAGE_OTHER,
@@ -48,8 +49,9 @@ enum {
     {"socket", 1, 0, 's'},\
     {"ldpath", 1, 0, 'l'},\
     {"config", 1, 0, 'C'},\
-    {"help", 1, 0, 'h'},\
+    {"help", 0, 0, 'h'},\
     {"version", 0, 0, 'V'},\
+    {"debug", 0, 0, OPT_DEBUG},\
     {0, 0, 0, 0}
 
 const char *bbconfig_get_optstr(void);
@@ -60,8 +62,16 @@ int bbconfig_parse_options(int opt, char *value);
 enum {
     OPT_DRIVER = CHAR_MAX + 1,
     OPT_FAILSAFE,
+    OPT_NO_FAILSAFE,
+    OPT_NO_XORG,
+    OPT_VGL_OPTIONS,
     OPT_STATUS,
     OPT_PIDFILE,
+    OPT_USE_SYSLOG,
+    OPT_DEBUG,
+    OPT_PM_METHOD,
+    OPT_PRIMUS_LD_PATH,
+    OPT_X_CONF_DIR_PATH,
 };
 
 /* Verbosity levels */
@@ -69,6 +79,7 @@ enum verbosity_level {
     VERB_NONE,
     VERB_ERR,
     VERB_WARN,
+    VERB_NOTICE,
     VERB_INFO,
     VERB_DEBUG,
     VERB_ALL
@@ -104,12 +115,16 @@ struct bb_status_struct {
     char * errors; /// Error message if any. First byte is 0 otherwise.
     enum bb_run_mode runmode; /// Running mode.
     pid_t x_pid;
+    int x_pipe[2];//pipes for reading/writing output from X's stdout/stderr
+    gboolean use_syslog;
+    char *program_name;
 };
 
 /* Structure containing the configuration. */
 struct bb_config_struct {
     char * x_display; /// X display number to use.
     char * x_conf_file; /// Path to the X configuration file.
+    char * x_conf_dir; /// Path to the dummy X configuration directory.
     char * bb_conf_file; /// Path to the bumblebeed configuration file.
     char * ld_path; /// LD_LIBRARY_PATH to launch applications.
     char * mod_path; /// ModulePath for xorg.
@@ -118,7 +133,11 @@ struct bb_config_struct {
     enum bb_pm_method pm_method; /// Which method to use for power management.
     int stop_on_exit; /// Whether to stop the X server on last optirun instance exit.
     int fallback_start; /// Wheter the application should be launched on the integrated card when X is not available.
+    int no_xorg; /// Do not start secondary X server
+    char * optirun_bridge; /// Accel/display bridge for optirun.
+    char * primus_ld_path; /// LD_LIBRARY_PATH containing primus libGL.so.1
     char * vgl_compress; /// VGL transport method.
+    char * vglrun_options; /* extra options passed to vglrun */
     char * driver; /// Driver to use (nvidia or nouveau).
     char * module_name; /* Kernel module to be loaded for the driver.
                                     * If empty, driver will be used. This is
@@ -133,9 +152,9 @@ extern struct bb_status_struct bb_status;
 extern struct bb_config_struct bb_config;
 
 /* Early initialization of bb_status */
-void init_early_config(int argc, char **argv, int runmode);
+void init_early_config(char **argv, int runmode);
 /* Parse configuration from command line and configuration files */
-void init_config(int argc, char **argv);
+void init_config(void);
 void config_dump(void);
 int config_validate(void);
 
@@ -162,3 +181,7 @@ GKeyFile *bbconfig_parse_conf(void);
 void bbconfig_parse_conf_driver(GKeyFile *bbcfg, char *driver);
 
 gboolean bb_bool_from_string(char* str);
+
+enum bb_pm_method bb_pm_method_from_string(char *value);
+
+size_t ensureZeroTerminated(char *buff, size_t size, size_t max);

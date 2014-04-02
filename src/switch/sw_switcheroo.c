@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011 Bumblebee Project
+ * Copyright (c) 2011-2013, The Bumblebee Project
  * Author: Jaron Viëtor AKA "Thulinma" <jaron@vietors.com>
  * Author: Peter Lekensteyn <lekensteyn@gmail.com>
  *
@@ -85,12 +85,6 @@ int switcheroo_is_available(struct switch_info info) {
   if (strcmp(info.configured_pm, "switcheroo") != 0) {
     bb_log(LOG_INFO, "Skipping switcheroo PM method because it is not"
             " explicitly selected in the configuration.\n");
-    return 0;
-  }
-  if (strcmp("nouveau", info.driver)) {
-    /* switcheroo cannot be used with drivers other than nouveau */
-    bb_log(LOG_WARNING, "vga_switcheroo can only be used with the nouveau"
-            " driver, skipping method.\n");
     return 0;
   }
   return 1;

@@ -1,7 +1,5 @@
-/// \file bbsecondary.c Contains code for enabling and disabling the secondary GPU.
-
 /*
- * Copyright (C) 2011 Bumblebee Project
+ * Copyright (c) 2011-2013, The Bumblebee Project
  * Author: Joaquín Ignacio Aramendía <samsagax@gmail.com>
  * Author: Jaron Viëtor AKA "Thulinma" <jaron@vietors.com>
  *
@@ -21,12 +19,16 @@
  * along with Bumblebee. If not, see <http://www.gnu.org/licenses/>.
  */
 
+#define _GNU_SOURCE
+#include <unistd.h>
 #include <X11/Xlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
 #include <fcntl.h>
 #include <stdlib.h>
+#include <stdbool.h>
+#include <errno.h>
 #include "bbsecondary.h"
 #include "switch/switching.h"
 #include "bbrun.h"
@@ -81,23 +83,22 @@ static char *xorg_path_w_driver(char *x_conf_file, char *driver) {
 }
 
 /**
- * Start the X server by fork-exec, turn card on and load driver if needed.
- * If after this method finishes X is running, it was successfull.
- * If it somehow fails, X should not be running after this method finishes.
+ * Load the kernel module, powering on the card beforehand
  */
-void start_secondary(void) {
+static bool switch_and_load(void)
+{
   char driver[BUFFER_SIZE] = {0};
   /* enable card if the switcher is available */
   if (switcher) {
     if (switch_on() != SWITCH_ON) {
       set_bb_error("Could not enable discrete graphics card");
-      return;
+      return false;
     }
   }
 
   //if runmode is BB_RUN_EXIT, do not start X, we are shutting down.
   if (bb_status.runmode == BB_RUN_EXIT) {
-    return;
+    return false;
   }
 
   if (pci_get_driver(driver, pci_bus_id_discrete, sizeof driver)) {
@@ -105,7 +106,7 @@ void start_secondary(void) {
     if (strcasecmp(bb_config.driver, driver)) {
       if (!module_unload(driver)) {
         /* driver failed to unload, aborting */
-        return;
+        return false;
       }
     }
   }
@@ -117,10 +118,22 @@ void start_secondary(void) {
     char *driver_name = bb_config.driver;
     if (!module_load(module_name, driver_name)) {
       set_bb_error("Could not load GPU driver");
-      return;
+      return false;
     }
   }
+  return true;
+}
 
+/**
+ * Start the X server by fork-exec, turn card on and load driver if needed.
+ * If after this method finishes X is running, it was successfull.
+ * If it somehow fails, X should not be running after this method finishes.
+ */
+bool start_secondary(bool need_secondary) {
+  if (!switch_and_load())
+    return false;
+  if (!need_secondary)
+    return true;
   //no problems, start X if not started yet
   if (!bb_is_running(bb_status.x_pid)) {
     char pci_id[12];
@@ -136,18 +149,30 @@ void start_secondary(void) {
       XORG_BINARY,
       bb_config.x_display,
       "-config", x_conf_file,
+      "-configdir", bb_config.x_conf_dir,
       "-sharevts",
       "-nolisten", "tcp",
       "-noreset",
+      "-verbose", "3",
       "-isolateDevice", pci_id,
-      "-modulepath",
-      bb_config.mod_path,
+      "-modulepath", bb_config.mod_path, // keep last
       NULL
     };
+    enum {n_x_args = sizeof(x_argv) / sizeof(x_argv[0])};
     if (!*bb_config.mod_path) {
-      x_argv[10] = 0; //remove -modulepath if not set
+      x_argv[n_x_args - 3] = 0; //remove -modulepath if not set
     }
-    bb_status.x_pid = bb_run_fork_ld(x_argv, bb_config.ld_path);
+    //close any previous pipe, if it (still) exists
+    if (bb_status.x_pipe[0] != -1){close(bb_status.x_pipe[0]); bb_status.x_pipe[0] = -1;}
+    if (bb_status.x_pipe[1] != -1){close(bb_status.x_pipe[1]); bb_status.x_pipe[1] = -1;}
+    //create a new pipe
+    if (pipe2(bb_status.x_pipe, O_NONBLOCK | O_CLOEXEC)){
+      set_bb_error("Could not create output pipe for X");
+      return false;
+    }
+    bb_status.x_pid = bb_run_fork_ld_redirect(x_argv, bb_config.ld_path, bb_status.x_pipe[1]);
+    //close the end of the pipe that is not ours
+    if (bb_status.x_pipe[1] != -1){close(bb_status.x_pipe[1]); bb_status.x_pipe[1] = -1;}
   }
 
   //check if X is available, for maximum 10 seconds.
@@ -158,8 +183,10 @@ void start_secondary(void) {
     if (xdisp != 0) {
       break;
     }
+    check_xorg_pipe();//make sure Xorg errors come in smoothly
     usleep(100000); //don't retry too fast
   }
+  check_xorg_pipe();//make sure Xorg errors come in smoothly
 
   //check if X is available
   if (xdisp == 0) {
@@ -179,19 +206,17 @@ void start_secondary(void) {
     bb_log(LOG_INFO, "X successfully started in %i seconds\n", time(0) - xtimer);
     //reset errors, if any
     set_bb_error(0);
+    return true;
   }
+  return false;
 }//start_secondary
 
 /**
- * Kill the second X server if any, turn card off if requested.
+ * Unload the kernel module and power down the card
  */
-void stop_secondary() {
+static void switch_and_unload(void)
+{
   char driver[BUFFER_SIZE];
-  // kill X if it is running
-  if (bb_is_running(bb_status.x_pid)) {
-    bb_log(LOG_INFO, "Stopping X server\n");
-    bb_stop_wait(bb_status.x_pid);
-  }
 
   if (bb_config.pm_method == PM_DISABLED && bb_status.runmode != BB_RUN_EXIT) {
     /* do not disable the card if PM is disabled unless exiting */
@@ -220,70 +245,19 @@ void stop_secondary() {
       bb_log(LOG_WARNING, "Unable to disable discrete card.");
     }
   }
+}
+
+/**
+ * Kill the second X server if any, turn card off if requested.
+ */
+void stop_secondary() {
+  // kill X if it is running
+  if (bb_is_running(bb_status.x_pid)) {
+    bb_log(LOG_INFO, "Stopping X server\n");
+    bb_stop_wait(bb_status.x_pid);
+  }
+  switch_and_unload();
 }//stop_secondary
-
-/**
- * Check the status of the discrete card
- * @return 0 if card is off, 1 if card is on, -1 if not-switchable.
- */
-int status_secondary(void) {
-  switch (switch_status()) {
-    case SWITCH_ON:
-      return 1;
-    case SWITCH_OFF:
-      return 0;
-    case SWITCH_UNAVAIL:
-    default:
-      return -1;
-  }
-}
-
-/**
- * Check what drivers are available and autodetect if possible. Driver, module
- * library path and module path are set
- */
-void check_secondary(void) {
-  /* determine driver to be used */
-  if (*bb_config.driver) {
-    bb_log(LOG_DEBUG, "Skipping auto-detection, using configured driver"
-            " '%s'\n", bb_config.driver);
-  } else if (strlen(CONF_DRIVER)) {
-    /* if the default driver is set, use that */
-    set_string_value(&bb_config.driver, CONF_DRIVER);
-    bb_log(LOG_DEBUG, "Using compile default driver '%s'", CONF_DRIVER);
-  } else if (module_is_loaded("nouveau")) {
-    /* loaded drivers take precedence over ones available for modprobing */
-    set_string_value(&bb_config.driver, "nouveau");
-    set_string_value(&bb_config.module_name, "nouveau");
-    bb_log(LOG_DEBUG, "Detected nouveau driver\n");
-  } else if (module_is_available(CONF_DRIVER_MODULE_NVIDIA)) {
-    /* Ubuntu and Mandriva use nvidia-current.ko. nvidia cannot be compiled into
-     * the kernel, so module_is_available makes module_is_loaded redundant */
-    set_string_value(&bb_config.driver, "nvidia");
-    set_string_value(&bb_config.module_name, CONF_DRIVER_MODULE_NVIDIA);
-    bb_log(LOG_DEBUG, "Detected nvidia driver (module %s)\n",
-            CONF_DRIVER_MODULE_NVIDIA);
-  } else if (module_is_available("nouveau")) {
-    set_string_value(&bb_config.driver, "nouveau");
-    set_string_value(&bb_config.module_name, "nouveau");
-    bb_log(LOG_DEBUG, "Detected nouveau driver\n");
-  }
-
-  if (!*bb_config.module_name) {
-    /* no module has been configured, set a sensible one based on driver */
-    if (strcmp(bb_config.driver, "nvidia") == 0 &&
-            module_is_available(CONF_DRIVER_MODULE_NVIDIA)) {
-      set_string_value(&bb_config.module_name, CONF_DRIVER_MODULE_NVIDIA);
-    } else {
-      set_string_value(&bb_config.module_name, bb_config.driver);
-    }
-  }
-
-  if (strcmp(bb_config.driver, "nvidia")) {
-    set_string_value(&bb_config.ld_path, CONF_LDPATH_NVIDIA);
-    set_string_value(&bb_config.mod_path, CONF_MODPATH_NVIDIA);
-  }
-}
 
 /**
  * Check for the availability of a PM method, warn if no method is available

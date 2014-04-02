@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2011-2013, The Bumblebee Project
- * Author: Jaron Viëtor AKA "Thulinma" <jaron@vietors.com>
+ * Author: Peter Lekensteyn <lekensteyn@gmail.com>
  *
  * This file is part of Bumblebee.
  *
@@ -18,17 +18,7 @@
  * along with Bumblebee. If not, see <http://www.gnu.org/licenses/>.
  */
 
-/*
- * Common networking functions for Bumblebee
- */
+
 #pragma once
 
-#define SOCK_BLOCK 0
-#define SOCK_NOBLOCK 1
-
-int socketConnect(char * address, int nonblock);
-void socketClose(int * sock);
-int socketWrite(int * sock, void * buffer, int len);
-int socketRead(int * sock, void * buffer, int len);
-int socketServer(char * address, int nonblock);
-int socketAccept(int * sock, int nonblock);
+int bbsocket_query(const char *key, char *target, size_t max_len);
